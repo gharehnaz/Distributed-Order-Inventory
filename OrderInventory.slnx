@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Contracts/Contracts.csproj" />
+  <Project Path="InventoryService/InventoryService.csproj" />
+  <Project Path="OrderService/OrderService.csproj" />
+  <Project Path="Test.EndPoint/Test.EndPoint.csproj" Id="99e3adfc-ca06-4444-8da1-8ebfba53ae33" />
+</Solution>
