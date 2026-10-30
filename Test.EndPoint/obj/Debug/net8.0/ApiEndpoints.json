@@ -1,0 +1,22 @@
+[
+  {
+    "ContainingType": "Test.EndPoint.Controllers.TestController",
+    "Method": "InventoryConcurencyTest",
+    "RelativePath": "api/Test/InventoryConcurencyTest",
+    "HttpMethod": "POST",
+    "IsController": true,
+    "Order": 0,
+    "Parameters": [],
+    "ReturnTypes": []
+  },
+  {
+    "ContainingType": "Test.EndPoint.Controllers.TestController",
+    "Method": "TestEventIdempotency",
+    "RelativePath": "api/Test/TestEventIdempotency",
+    "HttpMethod": "POST",
+    "IsController": true,
+    "Order": 0,
+    "Parameters": [],
+    "ReturnTypes": []
+  }
+]
