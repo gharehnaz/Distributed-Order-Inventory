@@ -6,10 +6,7 @@ using OrderService.Models;
 
 namespace OrderService.Messaging;
 
-public sealed class OutboxPublisher(
-    IServiceScopeFactory scopes,
-    IConfiguration config,
-    ILogger<OutboxPublisher> log) : BackgroundService
+public sealed class OutboxPublisher(IServiceScopeFactory scopes,IConfiguration config,ILogger<OutboxPublisher> log) : BackgroundService
 {
     private const int BatchSize = 1; // One-at-a-time keeps the 2-minute lease longer than the 60-second Kafka timeout.
     private const int MaxRetryCount = 10;

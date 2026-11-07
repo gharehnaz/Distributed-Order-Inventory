@@ -12,8 +12,8 @@ using OrderService.Data;
 namespace OrderService.Migrations
 {
     [DbContext(typeof(OrderDbContext))]
-    [Migration("20261030120115_initDb2")]
-    partial class initDb2
+    [Migration("20261107172934_initdb3")]
+    partial class initdb3
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -24,6 +24,48 @@ namespace OrderService.Migrations
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
+
+            modelBuilder.Entity("OrderService.Models.ApiIdempotencyRecord", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)")
+                        .UseCollation("Latin1_General_100_BIN2");
+
+                    b.Property<string>("Operation")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<Guid>("ResourceId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("ResponseStatusCode")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("Operation", "Key")
+                        .IsUnique()
+                        .HasDatabaseName("UX_ApiIdempotencyRecords_Operation_Key");
+
+                    b.ToTable("ApiIdempotencyRecords", (string)null);
+                });
 
             modelBuilder.Entity("OrderService.Models.Order", b =>
                 {
@@ -60,9 +102,25 @@ namespace OrderService.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<DateTime?>("DeadLetterAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsDeadLetter")
+                        .HasColumnType("bit");
+
                     b.Property<string>("LastError")
                         .HasMaxLength(2000)
                         .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("LockedBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime?>("LockedUntilUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("NextRetryAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<DateTime>("OccurredAtUtc")
                         .HasColumnType("datetime2");
@@ -84,7 +142,7 @@ namespace OrderService.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("PublishedAtUtc", "OccurredAtUtc");
+                    b.HasIndex("PublishedAtUtc", "IsDeadLetter", "NextRetryAtUtc", "OccurredAtUtc");
 
                     b.ToTable("OutboxMessages", (string)null);
                 });

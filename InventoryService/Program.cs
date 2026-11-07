@@ -14,18 +14,18 @@ builder.Services.AddDbContext<InventoryDbContext>(o => o.UseSqlServer(builder.Co
 
 //await topicInitializer.InitializeAsync();
 
-builder.Services.AddHostedService<OrderCreatedConsumer>();
-builder.Services.AddHostedService<OutboxPublisher>();
+//builder.Services.AddHostedService<OrderCreatedConsumer>();
+//builder.Services.AddHostedService<OutboxPublisher>();
 builder.Services.AddControllers();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
 await using (var scope = app.Services.CreateAsyncScope())
-{
 
-	await scope.ServiceProvider.GetRequiredService<InventoryDbContext>().Database.EnsureCreatedAsync();
-}
+
+	await scope.ServiceProvider.GetRequiredService<InventoryDbContext>().Database.MigrateAsync();
+
 if (app.Environment.IsDevelopment())
 {
 	app.UseSwagger();

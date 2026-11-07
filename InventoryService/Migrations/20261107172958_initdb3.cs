@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace InventoryService.Migrations
 {
     /// <inheritdoc />
-    public partial class initdb : Migration
+    public partial class initdb3 : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -23,6 +23,28 @@ namespace InventoryService.Migrations
                 {
                     table.PrimaryKey("PK_InventoryItems", x => x.Id);
                     table.CheckConstraint("CK_Inventory_NonNegative", "[AvailableQuantity] >= 0");
+                });
+
+            migrationBuilder.CreateTable(
+                name: "OutboxMessages",
+                columns: table => new
+                {
+                    Id = table.Column<Guid>(type: "uniqueidentifier", nullable: false),
+                    Type = table.Column<string>(type: "nvarchar(200)", maxLength: 200, nullable: false),
+                    Payload = table.Column<string>(type: "nvarchar(max)", nullable: false),
+                    OccurredAtUtc = table.Column<DateTime>(type: "datetime2", nullable: false),
+                    ProcessedAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    LockedBy = table.Column<string>(type: "nvarchar(100)", maxLength: 100, nullable: true),
+                    LockedUntilUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    RetryCount = table.Column<int>(type: "int", nullable: false),
+                    NextRetryAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true),
+                    LastError = table.Column<string>(type: "nvarchar(2000)", maxLength: 2000, nullable: true),
+                    IsDeadLetter = table.Column<bool>(type: "bit", nullable: false),
+                    DeadLetterAtUtc = table.Column<DateTime>(type: "datetime2", nullable: true)
+                },
+                constraints: table =>
+                {
+                    table.PrimaryKey("PK_OutboxMessages", x => x.Id);
                 });
 
             migrationBuilder.CreateTable(
@@ -45,6 +67,11 @@ namespace InventoryService.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
+                name: "IX_OutboxMessages_ProcessedAtUtc_IsDeadLetter_NextRetryAtUtc_OccurredAtUtc",
+                table: "OutboxMessages",
+                columns: new[] { "ProcessedAtUtc", "IsDeadLetter", "NextRetryAtUtc", "OccurredAtUtc" });
+
+            migrationBuilder.CreateIndex(
                 name: "IX_ProcessedMessages_EventId",
                 table: "ProcessedMessages",
                 column: "EventId",
@@ -56,6 +83,9 @@ namespace InventoryService.Migrations
         {
             migrationBuilder.DropTable(
                 name: "InventoryItems");
+
+            migrationBuilder.DropTable(
+                name: "OutboxMessages");
 
             migrationBuilder.DropTable(
                 name: "ProcessedMessages");

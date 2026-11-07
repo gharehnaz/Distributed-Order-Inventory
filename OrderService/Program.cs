@@ -12,7 +12,7 @@ builder.Services.AddSwaggerGen();
 var app = builder.Build();
 
 await using (var scope = app.Services.CreateAsyncScope())
-    await scope.ServiceProvider.GetRequiredService<OrderDbContext>().Database.EnsureCreatedAsync();
+	await scope.ServiceProvider.GetRequiredService<OrderDbContext>().Database.MigrateAsync();
 if (app.Environment.IsDevelopment())
 {
 	app.UseSwagger();

@@ -51,8 +51,25 @@ namespace InventoryService.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<DateTime?>("DeadLetterAtUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsDeadLetter")
+                        .HasColumnType("bit");
+
                     b.Property<string>("LastError")
-                        .HasColumnType("nvarchar(max)");
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("LockedBy")
+                        .HasMaxLength(100)
+                        .HasColumnType("nvarchar(100)");
+
+                    b.Property<DateTime?>("LockedUntilUtc")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("NextRetryAtUtc")
+                        .HasColumnType("datetime2");
 
                     b.Property<DateTime>("OccurredAtUtc")
                         .HasColumnType("datetime2");
@@ -64,6 +81,9 @@ namespace InventoryService.Migrations
                     b.Property<DateTime?>("ProcessedAtUtc")
                         .HasColumnType("datetime2");
 
+                    b.Property<int>("RetryCount")
+                        .HasColumnType("int");
+
                     b.Property<string>("Type")
                         .IsRequired()
                         .HasMaxLength(200)
@@ -71,7 +91,7 @@ namespace InventoryService.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ProcessedAtUtc");
+                    b.HasIndex("ProcessedAtUtc", "IsDeadLetter", "NextRetryAtUtc", "OccurredAtUtc");
 
                     b.ToTable("OutboxMessages");
                 });
