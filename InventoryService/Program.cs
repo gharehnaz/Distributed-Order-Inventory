@@ -17,6 +17,7 @@ builder.Services.AddDbContext<InventoryDbContext>(o => o.UseSqlServer(builder.Co
 //builder.Services.AddHostedService<OrderCreatedConsumer>();
 //builder.Services.AddHostedService<OutboxPublisher>();
 builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
@@ -29,7 +30,12 @@ await using (var scope = app.Services.CreateAsyncScope())
 if (app.Environment.IsDevelopment())
 {
 	app.UseSwagger();
-	app.UseSwaggerUI();
+	app.UseSwaggerUI(options =>
+	{
+		options.SwaggerEndpoint(
+			"/swagger/v1/swagger.json",
+			"Inventory API V1");
+	});
 }
 
 app.UseHttpsRedirection();
