@@ -1,4 +1,3 @@
-﻿
 using Confluent.Kafka;
 using Contracts;
 using Microsoft.Data.SqlClient;
@@ -7,204 +6,281 @@ using OrderService.Data;
 using OrderService.Models;
 using System.Text.Json;
 
-namespace OrderService.Messaging
+namespace OrderService.Messaging;
+
+/// <summary>
+/// Consumes inventory result events. Invalid payloads are sent to a DLQ;
+/// transient database failures are retried on the same record without advancing offsets.
+/// </summary>
+public sealed class InventoryResultConsumer : BackgroundService
 {
-	public class InventoryResultConsumer : BackgroundService
-	{
-		private readonly IServiceScopeFactory _scopeFactory;
-		private readonly IConfiguration _configuration;
-		private readonly ILogger<InventoryResultConsumer> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<InventoryResultConsumer> _logger;
 
-		public InventoryResultConsumer(
-			IServiceScopeFactory scopeFactory,
-			IConfiguration configuration,
-			ILogger<InventoryResultConsumer> logger)
-		{
-			_scopeFactory = scopeFactory;
-			_configuration = configuration;
-			_logger = logger;
-		}
+    public InventoryResultConsumer(
+        IServiceScopeFactory scopeFactory,
+        IConfiguration configuration,
+        ILogger<InventoryResultConsumer> logger)
+    {
+        _scopeFactory = scopeFactory;
+        _configuration = configuration;
+        _logger = logger;
+    }
 
-		protected override async Task ExecuteAsync(
-			CancellationToken stoppingToken)
-		{
-			var config = new ConsumerConfig
-			{
-				BootstrapServers = _configuration["Kafka:BootstrapServers"],
-				GroupId = "order-service",
-				AutoOffsetReset = AutoOffsetReset.Earliest,
-				EnableAutoCommit = false
-			};
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        var bootstrapServers = _configuration["Kafka:BootstrapServers"]
+            ?? throw new InvalidOperationException("Kafka:BootstrapServers is not configured.");
+        var reservedTopic = _configuration["Kafka:ReservedTopic"] ?? "inventory-reserved";
+        var rejectedTopic = _configuration["Kafka:RejectedTopic"] ?? "inventory-rejected";
+        var deadLetterTopic = _configuration["Kafka:DeadLetterTopic"] ?? "inventory.results.dlq";
 
-			using var consumer =
-				new ConsumerBuilder<string, string>(config).Build();
+        var consumerConfig = new ConsumerConfig
+        {
+            BootstrapServers = bootstrapServers,
+            GroupId = _configuration["Kafka:GroupId"] ?? "order-service",
+            AutoOffsetReset = AutoOffsetReset.Earliest,
+            EnableAutoCommit = false,
+            EnableAutoOffsetStore = false
+        };
+        var producerConfig = new ProducerConfig
+        {
+            BootstrapServers = bootstrapServers,
+            ClientId = "order-service-dlq-producer",
+            Acks = Acks.All,
+            EnableIdempotence = true
+        };
 
-			consumer.Subscribe(new[]
-			{
-				"inventory-reserved",
-				"inventory-rejected"
-			});
+        using var consumer = new ConsumerBuilder<string, string>(consumerConfig).Build();
+        using var producer = new ProducerBuilder<string, string>(producerConfig).Build();
+        consumer.Subscribe(new[] { reservedTopic, rejectedTopic });
 
-			try
-			{
-				while (!stoppingToken.IsCancellationRequested)
-				{
-					ConsumeResult<string, string> result;
+        try
+        {
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                ConsumeResult<string, string> result;
+                try
+                {
+                    result = consumer.Consume(stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (ConsumeException ex)
+                {
+                    _logger.LogError(ex, "Kafka consume failed");
+                    await Task.Delay(TimeSpan.FromSeconds(2), stoppingToken);
+                    continue;
+                }
 
-					try
-					{
-						result = consumer.Consume(stoppingToken);
-					}
-					catch (OperationCanceledException)
-						when (stoppingToken.IsCancellationRequested)
-					{
-						break;
-					}
+                var retryAttempt = 0;
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        if (result.Topic == reservedTopic)
+                        {
+                            var message = DeserializeAndValidate<InventoryReserved>(result.Message.Value);
+                            await ProcessInventoryResultAsync(message.EventId, message.OrderId,
+                                OrderStatus.Confirmed, null, stoppingToken);
+                        }
+                        else if (result.Topic == rejectedTopic)
+                        {
+                            var message = DeserializeAndValidate<InventoryRejected>(result.Message.Value);
+                            await ProcessInventoryResultAsync(message.EventId, message.OrderId,
+                                OrderStatus.Rejected, message.Reason, stoppingToken);
+                        }
+                        else
+                        {
+                            throw new InvalidDataException($"Unexpected topic: {result.Topic}");
+                        }
 
-					try
-					{
-						if (result.Topic == "inventory-reserved")
-						{
-							var message =
-								JsonSerializer.Deserialize<InventoryReserved>(
-									result.Message.Value)
-								?? throw new InvalidDataException(
-									"InventoryReserved payload is empty.");
+                        consumer.Commit(result);
+                        _logger.LogInformation("Committed inventory result at {TopicPartitionOffset}",
+                            result.TopicPartitionOffset);
+                        break;
+                    }
+                    catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                    {
+                        return;
+                    }
+                    catch (Exception ex) when (IsPoisonMessage(ex))
+                    {
+                        _logger.LogWarning(ex,
+                            "Poison message detected at {TopicPartitionOffset}; publishing to {DeadLetterTopic}",
+                            result.TopicPartitionOffset, deadLetterTopic);
+                        try
+                        {
+                            await PublishToDeadLetterAsync(producer, deadLetterTopic, result, ex, stoppingToken);
+                            consumer.Commit(result);
+                            _logger.LogWarning("Moved message from {TopicPartitionOffset} to {DeadLetterTopic}",
+                                result.TopicPartitionOffset, deadLetterTopic);
+                            break;
+                        }
+                        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                        {
+                            return;
+                        }
+                        catch (Exception publishException)
+                        {
+                            retryAttempt++;
+                            var delay = GetRetryDelay(retryAttempt);
+                            _logger.LogError(publishException,
+                                "Could not publish/commit DLQ record {TopicPartitionOffset}. Retry {RetryAttempt} in {Delay}; source offset remains uncommitted",
+                                result.TopicPartitionOffset, retryAttempt, delay);
+                            await Task.Delay(delay, stoppingToken);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        retryAttempt++;
+                        var delay = GetRetryDelay(retryAttempt);
+                        _logger.LogError(ex,
+                            "Transient processing failure for {TopicPartitionOffset}. Retry {RetryAttempt} in {Delay}",
+                            result.TopicPartitionOffset, retryAttempt, delay);
+                        await Task.Delay(delay, stoppingToken);
+                    }
+                }
+            }
+        }
+        finally
+        {
+            consumer.Close();
+        }
+    }
 
-							await ProcessInventoryResultAsync(
-								message.EventId,
-								message.OrderId,
-								OrderStatus.Confirmed,
-								null,
-								stoppingToken);
-						}
-						else if (result.Topic == "inventory-rejected")
-						{
-							var message =
-								JsonSerializer.Deserialize<InventoryRejected>(
-									result.Message.Value)
-								?? throw new InvalidDataException(
-									"InventoryRejected payload is empty.");
+    private static T DeserializeAndValidate<T>(string? payload) where T : class
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+            throw new InvalidDataException("Inventory result payload is empty.");
 
-							await ProcessInventoryResultAsync(
-								message.EventId,
-								message.OrderId,
-								OrderStatus.Rejected,
-								message.Reason,
-								stoppingToken);
-						}
-						else
-						{
-							throw new InvalidOperationException(
-								$"Unexpected topic: {result.Topic}");
-						}
+        T? message;
+        try
+        {
+            message = JsonSerializer.Deserialize<T>(payload);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidDataException($"Payload does not match {typeof(T).Name} contract.", ex);
+        }
 
-						// Commit only after successful processing
-						// or confirmed duplicate detection.
-						consumer.Commit(result);
-					}
-					catch (OperationCanceledException)
-						when (stoppingToken.IsCancellationRequested)
-					{
-						break;
-					}
-					catch (Exception ex)
-					{
-						_logger.LogError(ex,
-							"Failed to process message. Topic: {Topic}, Offset: {Offset}",
-							result.Topic,
-							result.Offset.Value);
+        if (message is null)
+            throw new InvalidDataException($"Payload deserialized to null for {typeof(T).Name}.");
 
-						// Do not commit. Kafka can redeliver this message.
-						await Task.Delay(1000, stoppingToken);
-					}
-				}
-			}
-			finally
-			{
-				consumer.Close();
-			}
-		}
+        switch (message)
+        {
+            case InventoryReserved reserved when
+                reserved.EventId == Guid.Empty || reserved.OrderId == Guid.Empty ||
+                reserved.ProductId == Guid.Empty || reserved.Quantity <= 0 || reserved.OccurredAtUtc == default:
+                throw new InvalidDataException("InventoryReserved contains invalid required fields.");
+            case InventoryRejected rejected when
+                rejected.EventId == Guid.Empty || rejected.OrderId == Guid.Empty ||
+                rejected.ProductId == Guid.Empty || rejected.Quantity <= 0 ||
+                rejected.OccurredAtUtc == default || string.IsNullOrWhiteSpace(rejected.Reason):
+                throw new InvalidDataException("InventoryRejected contains invalid required fields.");
+        }
+        return message;
+    }
 
-		private async Task ProcessInventoryResultAsync(
-			Guid eventId,
-			Guid orderId,
-			OrderStatus status,
-			string? reason,
-			CancellationToken ct)
-		{
-			await using var scope = _scopeFactory.CreateAsyncScope();
+    private static bool IsPoisonMessage(Exception exception) =>
+        exception is InvalidDataException or JsonException or NotSupportedException;
 
-			var db = scope.ServiceProvider
-				.GetRequiredService<OrderDbContext>();
+    private static TimeSpan GetRetryDelay(int attempt)
+    {
+        var seconds = Math.Min(30, Math.Pow(2, Math.Min(attempt - 1, 5)));
+        return TimeSpan.FromSeconds(seconds);
+    }
 
-			await using var tx =
-				await db.Database.BeginTransactionAsync(ct);
+    private static async Task PublishToDeadLetterAsync(
+        IProducer<string, string> producer,
+        string deadLetterTopic,
+        ConsumeResult<string, string> source,
+        Exception exception,
+        CancellationToken ct)
+    {
+        var headers = new Headers();
+        if (source.Message.Headers is not null)
+        {
+            foreach (var header in source.Message.Headers)
+                headers.Add(header.Key, header.GetValueBytes());
+        }
 
-			try
-			{
-				// 1. Register EventId in Inbox
-				db.ProcessedMessages.Add(new ProcessedMessage
-				{
-					EventId = eventId,
-					ProcessedAtUtc = DateTime.UtcNow
-				});
+        var deadLetterId = $"{source.Topic}:{source.Partition.Value}:{source.Offset.Value}";
+        headers.Add("x-dead-letter-id", System.Text.Encoding.UTF8.GetBytes(deadLetterId));
+        headers.Add("x-original-topic", System.Text.Encoding.UTF8.GetBytes(source.Topic));
+        headers.Add("x-original-partition", System.Text.Encoding.UTF8.GetBytes(source.Partition.Value.ToString()));
+        headers.Add("x-original-offset", System.Text.Encoding.UTF8.GetBytes(source.Offset.Value.ToString()));
+        headers.Add("x-dead-letter-reason", System.Text.Encoding.UTF8.GetBytes(Truncate(exception.Message, 2000)));
+        headers.Add("x-dead-letter-exception", System.Text.Encoding.UTF8.GetBytes(exception.GetType().FullName ?? exception.GetType().Name));
+        headers.Add("x-dead-lettered-at-utc", System.Text.Encoding.UTF8.GetBytes(DateTimeOffset.UtcNow.ToString("O")));
 
-				await db.SaveChangesAsync(ct);
+        var deadLetterMessage = new Message<string, string>
+        {
+            Key = source.Message.Key,
+            Value = source.Message.Value,
+            Headers = headers,
+            Timestamp = source.Message.Timestamp
+        };
+        await producer.ProduceAsync(deadLetterTopic, deadLetterMessage, ct);
+    }
 
-				// 2. Update Order
-				var order = await db.Orders
-					.FirstOrDefaultAsync(x => x.Id == orderId, ct);
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
 
-				if (order is not null &&
-					order.Status == OrderStatus.Pending)
-				{
-					order.Status = status;
-					order.RejectionReason = reason;
+    private async Task ProcessInventoryResultAsync(
+        Guid eventId,
+        Guid orderId,
+        OrderStatus status,
+        string? reason,
+        CancellationToken ct)
+    {
+        await using var scope = _scopeFactory.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<OrderDbContext>();
+        await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-					await db.SaveChangesAsync(ct);
-				}
+        try
+        {
+            db.ProcessedMessages.Add(new ProcessedMessage
+            {
+                EventId = eventId,
+                ProcessedAtUtc = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync(ct);
 
-				// 3. Commit both Inbox and Order changes
-				await tx.CommitAsync(ct);
+            var order = await db.Orders.FirstOrDefaultAsync(x => x.Id == orderId, ct);
+            if (order is not null && order.Status == OrderStatus.Pending)
+            {
+                order.Status = status;
+                order.RejectionReason = reason;
+                await db.SaveChangesAsync(ct);
+            }
 
-				_logger.LogInformation(
-					"Processed event {EventId} for order {OrderId}",
-					eventId,
-					orderId);
-			}
-			catch (DbUpdateException ex)
-				when (IsUniqueConstraintViolation(ex))
-			{
-				await tx.RollbackAsync(ct);
+            await tx.CommitAsync(ct);
+            _logger.LogInformation("Processed event {EventId} for order {OrderId}", eventId, orderId);
+        }
+        catch (DbUpdateException ex) when (IsUniqueConstraintViolation(ex))
+        {
+            await tx.RollbackAsync(ct);
+            _logger.LogInformation("Duplicate event {EventId} ignored", eventId);
+        }
+        catch
+        {
+            await tx.RollbackAsync(ct);
+            throw;
+        }
+    }
 
-				_logger.LogInformation(
-					"Duplicate event {EventId} ignored",
-					eventId);
-			}
-			catch
-			{
-				await tx.RollbackAsync(ct);
-				throw;
-			}
-		}
-
-		private static bool IsUniqueConstraintViolation(
-			Exception exception)
-		{
-			for (Exception? current = exception;
-				 current is not null;
-				 current = current.InnerException)
-			{
-				if (current is SqlException sqlException &&
-					(sqlException.Number == 2601 ||
-					 sqlException.Number == 2627))
-				{
-					return true;
-				}
-			}
-
-			return false;
-		}
-	}
+    private static bool IsUniqueConstraintViolation(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is SqlException sqlException &&
+                (sqlException.Number == 2601 || sqlException.Number == 2627))
+                return true;
+        }
+        return false;
+    }
 }

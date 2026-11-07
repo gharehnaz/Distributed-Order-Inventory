@@ -32,7 +32,9 @@ public sealed class InventoryDbContext(DbContextOptions<InventoryDbContext> opti
 			entity.Property(x => x.Payload)
 				.IsRequired();
 
-			entity.HasIndex(x => x.ProcessedAtUtc);
+            entity.Property(x => x.LastError).HasMaxLength(2000);
+            entity.Property(x => x.LockedBy).HasMaxLength(100);
+            entity.HasIndex(x => new { x.ProcessedAtUtc, x.IsDeadLetter, x.NextRetryAtUtc, x.OccurredAtUtc });
 		});
 	}
 

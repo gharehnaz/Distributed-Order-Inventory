@@ -1,5 +1,83 @@
-﻿################################################################################
-# This .gitignore file was automatically created by Microsoft(R) Visual Studio.
-################################################################################
+﻿
+# Build Results
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa]rm/
+[Aa]rm64/
+out/
+[Ll]ogs/
 
-/.vs/OrderInventory.slnx
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.rsuser
+*.sln.ide
+
+# Rider / JetBrains
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# Test Results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+*.trx
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+
+# Publish
+publish/
+[Pp]ublish/
+artifacts/
+
+# ASP.NET Core
+wwwroot/lib/
+appsettings.Development.json
+appsettings.Local.json
+
+# Environment / Secrets
+.env
+.env.*
+!.env.example
+secrets.json
+
+# Temporary Files
+*.tmp
+*.temp
+*.bak
+*.log
+*.cache
+
+# OS Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Database Files
+*.mdf
+*.ldf
+*.db
+*.sqlite
+
+# Docker
+.docker/
+
+# Node (if applicable)
+node_modules/
